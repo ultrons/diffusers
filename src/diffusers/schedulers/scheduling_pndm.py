@@ -142,7 +142,7 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
         self.cur_model_output = 0
         self.counter = 0
         self.cur_sample = None
-        self.ets = []
+        self.ets_count = torch.zeros(1, dtype=torch.long).to(device)
 
         # setable values
         self.num_inference_steps = None
