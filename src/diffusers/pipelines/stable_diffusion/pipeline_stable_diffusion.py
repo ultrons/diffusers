@@ -16,6 +16,7 @@ import inspect
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
+import torch_xla.core.xla_model as xm
 from packaging import version
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 
@@ -263,6 +264,7 @@ class StableDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         `pipeline.enable_sequential_cpu_offload()` the execution device can only be inferred from Accelerate's module
         hooks.
         """
+        device = xm.xla_device()
         if not hasattr(self.unet, "_hf_hook"):
             return self.device
         for module in self.unet.modules():
@@ -663,6 +665,8 @@ class StableDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+        import torch_xla.debug.metrics as met
+        import torch_xla.core.xla_model as xm
 
         # 7. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
@@ -679,6 +683,7 @@ class StableDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     encoder_hidden_states=prompt_embeds,
                     cross_attention_kwargs=cross_attention_kwargs,
                 ).sample
+                xm.mark_step()
 
                 # perform guidance
                 if do_classifier_free_guidance:
@@ -687,12 +692,14 @@ class StableDiffusionPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                xm.mark_step()
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
+                xm.mark_step()
 
         if output_type == "latent":
             image = latents
