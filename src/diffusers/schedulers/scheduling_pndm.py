@@ -16,6 +16,8 @@
 
 import math
 from typing import List, Optional, Tuple, Union
+import torch_xla.core.xla_model as xm
+import torch_xla.debug.metrics as met
 
 import numpy as np
 import torch
@@ -185,7 +187,8 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
         timesteps = np.concatenate([self.prk_timesteps, self.plms_timesteps]).astype(np.int64)
         self.timesteps = torch.from_numpy(timesteps).to(device)
 
-        self.ets = []
+        self.ets = torch.zeros(4, 1, 4, 64, 64).to(device)
+        self.ets_count = torch.zeros(1, dtype=torch.long).to(device)
         self.counter = 0
         self.cur_model_output = 0
 
@@ -215,6 +218,7 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
             returning a tuple, the first element is the sample tensor.
 
         """
+
         if self.counter < len(self.prk_timesteps) and not self.config.skip_prk_steps:
             return self.step_prk(model_output=model_output, timestep=timestep, sample=sample, return_dict=return_dict)
         else:
@@ -314,26 +318,27 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
         prev_timestep = timestep - self.config.num_train_timesteps // self.num_inference_steps
 
         if self.counter != 1:
-            self.ets = self.ets[-3:]
-            self.ets.append(model_output)
+            self.ets.index_copy_(0, self.ets_count,  model_output.unsqueeze(0))
+            self.ets_count = self.ets_count + 1
         else:
             prev_timestep = timestep
             timestep = timestep + self.config.num_train_timesteps // self.num_inference_steps
 
-        if len(self.ets) == 1 and self.counter == 0:
-            model_output = model_output
+        if self.ets_count == 1 and self.counter == 0:
+            #model_output = model_output
             self.cur_sample = sample
-        elif len(self.ets) == 1 and self.counter == 1:
-            model_output = (model_output + self.ets[-1]) / 2
+        elif self.ets_count == 1 and self.counter == 1:
+            model_output = (model_output + self.ets_count[0]) / 2
             sample = self.cur_sample
             self.cur_sample = None
-        elif len(self.ets) == 2:
-            model_output = (3 * self.ets[-1] - self.ets[-2]) / 2
-        elif len(self.ets) == 3:
-            model_output = (23 * self.ets[-1] - 16 * self.ets[-2] + 5 * self.ets[-3]) / 12
+        elif self.ets_count == 2:
+            model_output = (3 * self.ets[1] - self.ets[0]) / 2
+        elif self.ets_count == 3:
+            model_output = (23 * self.ets[2] - 16 * self.ets[1] + 5 * self.ets[0]) / 12
         else:
-            model_output = (1 / 24) * (55 * self.ets[-1] - 59 * self.ets[-2] + 37 * self.ets[-3] - 9 * self.ets[-4])
+            model_output = (1 / 24) * (55 * self.ets[3] - 59 * self.ets[2] + 37 * self.ets[1] - 9 * self.ets[0])
 
+        xm.master_print(f"DEBUG: ETS len: {len(self.ets)}, model_output size: {model_output.size()}")
         prev_sample = self._get_prev_sample(sample, timestep, prev_timestep, model_output)
         self.counter += 1
 
@@ -368,8 +373,10 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
         # sample -> x_t
         # model_output -> e_θ(x_t, t)
         # prev_sample -> x_(t−δ)
+
         alpha_prod_t = self.alphas_cumprod[timestep]
         alpha_prod_t_prev = self.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.final_alpha_cumprod
+
         beta_prod_t = 1 - alpha_prod_t
         beta_prod_t_prev = 1 - alpha_prod_t_prev
 
